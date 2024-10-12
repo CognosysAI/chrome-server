@@ -10,6 +10,23 @@ use warp::{Filter, Rejection, Reply};
 
 type Result<T> = std::result::Result<T, Rejection>;
 
+lazy_static::lazy_static! {
+    pub static ref HOST_NAME: String = std::env::var("HOSTNAME").unwrap_or_default();
+    static ref ENDPOINT: String = {
+        let default_port = std::env::args()
+            .nth(4)
+            .unwrap_or("9222".into())
+            .parse::<u32>()
+            .unwrap_or_default();
+        let default_port = if default_port == 0 {
+            9222
+        } else {
+            default_port
+        };
+        format!("http://127.0.0.1:{}/json/version", default_port)
+    };
+}
+
 /// shutdown the chrome instance by process id
 #[cfg(target_os = "windows")]
 fn shutdown(pid: &u32) {
@@ -62,22 +79,9 @@ fn fork(chrome_path: &String, chrome_address: &String, port: Option<u32>) -> Str
 }
 
 /// get json endpoint for chrome instance proxying
+/// get json endpoint for chrome instance proxying
 async fn version_handler(endpoint_path: Option<&str>) -> Result<impl Reply> {
-    lazy_static! {
-        static ref ENDPOINT: String = {
-            let default_port = std::env::args()
-                .nth(4)
-                .unwrap_or("9222".into())
-                .parse::<u32>()
-                .unwrap_or_default();
-            let default_port = if default_port == 0 {
-                9222
-            } else {
-                default_port
-            };
-            format!("http://127.0.0.1:{}/json/version", default_port)
-        };
-    }
+    use hyper::body::to_bytes;
     let req = Request::builder()
         .method(Method::GET)
         .uri(endpoint_path.unwrap_or(ENDPOINT.as_str()))
@@ -86,10 +90,28 @@ async fn version_handler(endpoint_path: Option<&str>) -> Result<impl Reply> {
         .unwrap_or_default();
 
     let resp = match CLIENT.request(req).await {
-        Ok(resp) => {
+        Ok(mut resp) => {
             if !IS_HEALTHY.load(Ordering::Relaxed) {
                 IS_HEALTHY.store(true, Ordering::Relaxed);
             }
+
+            if let Ok(body_bytes) = to_bytes(resp.body_mut()).await {
+                if let Ok(body_str) = String::from_utf8(body_bytes.to_vec()) {
+                    let modified_body_str = if !HOST_NAME.is_empty() {
+                        body_str.replace("127.0.0.1", &HOST_NAME)
+                    } else {
+                        body_str
+                    };
+
+                    let modified_response = hyper::Response::builder()
+                        .status(resp.status())
+                        .body(Body::from(modified_body_str))
+                        .unwrap_or_default();
+
+                    return Ok(modified_response);
+                }
+            }
+
             resp
         }
         _ => {

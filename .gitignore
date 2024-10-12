@@ -10,3 +10,4 @@ cloudbuild.yaml
 
 # chrome cache
 ~
+.env
